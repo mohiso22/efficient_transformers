@@ -1,7 +1,7 @@
 {
     "model_setup": {
-                        "height": 192,
-                        "width": 320,
+                        "height": 96,
+                        "width": 160,
                         "num_frames": 81,
                         "num_transformer_layers_high": 1,
                         "num_transformer_layers_low": 1,
@@ -10,7 +10,8 @@
     "mad_validation": {
                          "tolerances": {
                                 "transformer_high": 0.3,
-                                "transformer_low": 0.2
+                                "transformer_low": 0.2,
+                                "vae_decoder": 0.09
                             }
                         },
     "pipeline_params": {
@@ -29,35 +30,60 @@
                         },
     "modules": {
         "transformer": {
-          "specializations": [
-                              {
-                                  "batch_size": "1",
-                                  "num_channels": "16",
-                                  "steps": "1",
-                                  "sequence_length": "512",
-                                  "model_type": 1
-                              },
-                              {
-                                  "batch_size": "1",
-                                  "num_channels": "16",
-                                  "steps": "1",
-                                  "sequence_length": "512",
-                                  "model_type": 2
-                              }
-                          ],
-          "compilation":  {
-                                "onnx_path": null,
-                                "compile_dir": null,
-                                "mdp_ts_num_devices": 1,
-                                "mxfp6_matmul": true,
-                                "convert_to_fp16": true,
-                                "aic_num_cores": 16,
-                                "mos": 1,
-                                "mdts_mos": 1
-                            },
-          "execute":     {
-                                "device_ids": null
-                          }
+                        "specializations": [
+                                            {
+                                                "batch_size": "1",
+                                                "num_channels": "16",
+                                                "steps": "1",
+                                                "sequence_length": "512",
+                                                "model_type": 1
+                                            },
+                                            {
+                                                "batch_size": "1",
+                                                "num_channels": "16",
+                                                "steps": "1",
+                                                "sequence_length": "512",
+                                                "model_type": 2
+                                            }
+                                        ],
+                        "compilation":  {
+                                                "onnx_path": null,
+                                                "compile_dir": null,
+                                                "mdp_ts_num_devices": 1,
+                                                "mxfp6_matmul": true,
+                                                "convert_to_fp16": true,
+                                                "aic_num_cores": 16,
+                                                "mos": 1,
+                                                "mdts_mos": 1
+                                            },
+                        "execute":     {
+                                                "device_ids": null
+                                        }
+        },
+        "vae_decoder":{
+                    "specializations": [
+                                        {
+                                            "batch_size": 1,
+                                            "num_channels": 16
+                                        }
+                                        ],
+                    "compilation":
+                                    {
+                                    "onnx_path": null,
+                                    "compile_dir": null,
+                                    "mdp_ts_num_devices": 1,
+                                    "mxfp6_matmul": false,
+                                    "convert_to_fp16": true,
+                                    "aic_num_cores": 16,
+                                    "aic-enable-depth-first": true,
+                                    "compile_only":true,
+                                    "mos": 1,
+                                    "mdts_mos": 1
+                                    },
+                    "execute":
+                                {
+                                    "device_ids": null
+                                }
         }
-    }
+  }
 }

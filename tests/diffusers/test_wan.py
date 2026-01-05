@@ -245,11 +245,11 @@ def wan_pipeline_call_with_mad_validation(
             else:
                 timestep = t.expand(latents.shape[0])
 
-            batch_size, num_channels, num_frames, height, width = latents.shape
+            batch_size, num_channels, latent_num_frames, latent_height, latent_width = latents.shape
             p_t, p_h, p_w = current_model.config.patch_size
-            post_patch_num_frames = num_frames // p_t
-            post_patch_height = height // p_h
-            post_patch_width = width // p_w
+            post_patch_num_frames = latent_num_frames // p_t
+            post_patch_height = latent_height // p_h
+            post_patch_width = latent_width // p_w
 
             # Prepare transformer inputs
             rotary_emb = current_model.rope(latent_model_input)
@@ -312,29 +312,65 @@ def wan_pipeline_call_with_mad_validation(
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % pipeline.scheduler.order == 0):
                 progress_bar.update()
 
-    # Step 9: Decode latents to video (using CPU VAE for now)
+    # Step 9: Decode latents to video using QAIC VAE decoder
     if not output_type == "latent":
-        latents = latents.to(pipeline.vae_decode.dtype)
+        # Prepare latents for VAE decoding
+        latents = latents.to(pipeline.vae_decoder.model.dtype)
+
+        # Apply VAE normalization (denormalization)
         latents_mean = (
-            torch.tensor(pipeline.vae_decode.config.latents_mean)
-            .view(1, pipeline.vae_decode.config.z_dim, 1, 1, 1)
+            torch.tensor(pipeline.vae_decoder.model.config.latents_mean)
+            .view(1, pipeline.vae_decoder.model.config.z_dim, 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
-        latents_std = 1.0 / torch.tensor(pipeline.vae_decode.config.latents_std).view(
-            1, pipeline.vae_decode.config.z_dim, 1, 1, 1
+        latents_std = 1.0 / torch.tensor(pipeline.vae_decoder.model.config.latents_std).view(
+            1, pipeline.vae_decoder.model.config.z_dim, 1, 1, 1
         ).to(latents.device, latents.dtype)
         latents = latents / latents_std + latents_mean
 
-        video = pipeline.model.vae.decode(latents, return_dict=False)[0]
+        # Initialize VAE decoder inference session
+        if pipeline.vae_decoder.qpc_session is None:
+            pipeline.vae_decoder.qpc_session = QAICInferenceSession(
+                str(pipeline.vae_decoder.qpc_path), device_ids=pipeline.vae_decoder.device_ids
+            )
+        # MAD Validation for VAE decoder - PyTorch reference inference
+        video_torch = pytorch_pipeline.vae.decode(latents, return_dict=False)[0]
 
-        video = pipeline.model.video_processor.postprocess_video(video.detach())
+        # Allocate output buffer for VAE decoder
+        output_buffer = {"sample": np.random.rand(batch_size, 3, num_frames, height, width).astype(np.int32)}
+        pipeline.vae_decoder.qpc_session.set_buffers(output_buffer)
+
+        # Run VAE decoder inference and measure time
+        inputs = {"latent_sample": latents.numpy()}
+        start_decode_time = time.perf_counter()
+        video = pipeline.vae_decoder.qpc_session.run(inputs)
+        end_decode_time = time.perf_counter()
+        vae_decoder_perf = end_decode_time - start_decode_time
+
+        # VAE decoder MAD validation
+        print(" Performing MAD validation for VAE decoder...")
+        mad_validator.validate_module_mad(
+            video_torch.detach().cpu().numpy(),
+            video["sample"],
+            "vae_decoder",
+            "video decoding"
+        )
+
+        # Post-process video for output
+        video_tensor = torch.from_numpy(video["sample"])
+        video = pipeline.model.video_processor.postprocess_video(video_tensor)
     else:
         video = latents
+        vae_decoder_perf = 0.0  # No VAE decoding for latent output
 
     # Build performance metrics
-    perf_metrics = [
-        ModulePerf(module_name="transformer", perf=transformer_perf),
-    ]
+    perf_data = {
+        "transformer": transformer_perf,  # Unified transformer (QAIC)
+        "vae_decoder": vae_decoder_perf,
+    }
+
+    # Build performance metrics for output
+    perf_metrics = [ModulePerf(module_name=name, perf=perf_data[name]) for name in perf_data.keys()]
 
     return QEffPipelineOutput(
         pipeline_module=perf_metrics,
@@ -417,11 +453,10 @@ def wan_pipeline():
 @pytest.mark.wan
 def test_wan_pipeline(wan_pipeline):
     """
-    Comprehensive WAN pipeline test that focuses on transformer validation:
-    - 192x320 resolution - 2 transformer layers total (1 high + 1 low)
-    - MAD validation for transformer modules only
+    Comprehensive WAN pipeline test with transformer and VAE decoder validation:
+    - MAD validation for transformer and VAE decoder modules
     - Functional video generation test
-    - Export/compilation checks for transformer
+    - Export/compilation checks for transformer and VAE decoder
     - Returns QEffPipelineOutput with performance metrics
     """
     pipeline, pytorch_pipeline = wan_pipeline
@@ -509,16 +544,20 @@ def test_wan_pipeline(wan_pipeline):
             print(result)
 
         if config["validation_checks"]["onnx_export"]:
-            # Check if transformer ONNX file exists
+            # Check if ONNX files exist
             print("\n ONNX Export Validation:")
-            if hasattr(pipeline.transformer, "onnx_path") and pipeline.transformer.onnx_path:
-                DiffusersTestUtils.check_file_exists(str(pipeline.transformer.onnx_path), "transformer ONNX")
+            for module_name in ["transformer", "vae_decoder"]:
+                module_obj = getattr(pipeline, module_name, None)
+                if module_obj and hasattr(module_obj, "onnx_path") and module_obj.onnx_path:
+                    DiffusersTestUtils.check_file_exists(str(module_obj.onnx_path), f"{module_name} ONNX")
 
         if config["validation_checks"]["compilation"]:
-            # Check if transformer QPC file exists
+            # Check if QPC files exist
             print("\n Compilation Validation:")
-            if hasattr(pipeline.transformer, "qpc_path") and pipeline.transformer.qpc_path:
-                DiffusersTestUtils.check_file_exists(str(pipeline.transformer.qpc_path), "transformer QPC")
+            for module_name in ["transformer", "vae_decoder"]:
+                module_obj = getattr(pipeline, module_name, None)
+                if module_obj and hasattr(module_obj, "qpc_path") and module_obj.qpc_path:
+                    DiffusersTestUtils.check_file_exists(str(module_obj.qpc_path), f"{module_name} QPC")
 
         # Print test summary
         print(f"\nTotal execution time: {execution_time:.4f}s")
