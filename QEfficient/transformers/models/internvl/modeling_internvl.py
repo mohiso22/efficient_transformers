@@ -135,14 +135,18 @@ class QEffInternVLModel(nn.Module):
 
         per_patch_embed_size = (img_size // self.config.vision_config.patch_size * self.config.downsample_ratio) ** 2
         vision_size = int(batch_size * num_patches * per_patch_embed_size)
-        vision = [
-            {
-                "batch_size": batch_size,
-                "num_patches": num_patches,
-                "img_size": img_size,
-                "batched_num_patches": batch_size * num_patches,
-            }
-        ]
+
+        num_patches = [3, 4, 7, 13]  # TODO pass from example script and write fn to get num patches based on img dims 
+        vision = []
+
+        for patches in num_patches:
+            vision.append({
+                    "batch_size": batch_size,
+                    "num_patches": patches,
+                    "img_size": img_size,
+                    "batched_num_patches": batch_size * patches,
+            })
+
         if comp_ctx_lengths_prefill and comp_ctx_lengths_decode:
             lang = []
 
@@ -186,22 +190,35 @@ class QEffInternVLModel(nn.Module):
                 "batch_size": 1 if continuous_batching else batch_size,
                 "seq_len": prefill_seq_len,
                 "ctx_len": ctx_len,
-                "num_patches": num_patches,
+                "batched_num_patches": max(num_patches),
                 "img_size": img_size,
                 "vision_size": vision_size,
             }
-            if continuous_batching:
-                lang_prefill["full_batch_size"] = kv_cache_batch_size
-            else:
-                lang_prefill["batch_size"] = kv_cache_batch_size
-            if full_batch_size:
-                lang_prefill["full_batch_exec_size"] = full_batch_size
+            # # for multi resolution for single qpc approach # TODO clean up
+            # multi_lang_prefill = []
+            # for patches in num_patches:
+            #     lang_prefill = {
+            #         "batch_size": full_batch_size if continuous_batching else batch_size,
+            #         "seq_len": prefill_seq_len,
+            #         "ctx_len": ctx_len,
+            #         "batched_num_patches": patches,
+            #         "img_size": img_size,
+            #         # "vision_size": vision_size,
+            #     }
 
+            #     if continuous_batching:
+            #         lang_prefill["full_batch_size"] = kv_cache_batch_size
+            #     else:
+            #         lang_prefill["batch_size"] = kv_cache_batch_size
+            #     if full_batch_size:
+            #         lang_prefill["full_batch_exec_size"] = full_batch_size
+            #     multi_lang_prefill.append(lang_prefill)
+            
             lang_decode = {
                 "batch_size": full_batch_size if continuous_batching else batch_size,
                 "seq_len": "1",
                 "ctx_len": ctx_len,
-                "num_patches": num_patches,
+                "batched_num_patches":  max(num_patches),
                 "img_size": img_size,
                 "vision_size": vision_size,
             }
@@ -211,6 +228,7 @@ class QEffInternVLModel(nn.Module):
             else:
                 lang_decode["batch_size"] = kv_cache_batch_size
 
+            # lang = [*multi_lang_prefill, lang_decode]
             lang = [lang_prefill, lang_decode]
 
         specializations = {}
@@ -220,6 +238,8 @@ class QEffInternVLModel(nn.Module):
             specializations["lang"] = lang
             return specializations, compiler_options
         else:
+            # lang[0]["batched_num_patches"] = max(num_patches)
+            # lang[-1]["batched_num_patches"] = max(num_patches)
             lang[0].pop("vision_size")
             lang[1].pop("vision_size")
             return lang, compiler_options
@@ -251,6 +271,7 @@ class QEffInternVLModel(nn.Module):
             dynamic_axes["lang"] = lang_dynamic_axes
         else:
             dynamic_axes = {**vision_dynamic_axes, **lang_dynamic_axes}
+        # print(f">>>>>>>>>> dynamic axes ; {dynamic_axes}") #TODO clean up
         return dynamic_axes
 
     def get_output_names(self, kv_offload: bool = False):
@@ -270,6 +291,7 @@ class QEffInternVLModel(nn.Module):
             lang_output_names.insert(1, "pixel_values_RetainedState")
             lang_output_names.insert(2, "image_idx_output")
             return lang_output_names
+        # print(f">>>>>>>>> output_names; {output_names}") #TODO clean up
         return output_names
 
     def get_dummy_inputs(

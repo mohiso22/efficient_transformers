@@ -11,7 +11,7 @@ from typing import List
 import requests
 import torch
 from PIL import Image
-from transformers import AutoTokenizer, TextStreamer
+from transformers import AutoTokenizer, TextStreamer, AutoConfig
 
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.utils.test_utils import InternProcessor
@@ -31,15 +31,24 @@ def run_intern_on_aic(
     num_devices=1,
     num_cores=16,
 ):
+    ## STEP 2 -- EXPORT & COMPILE THE MODEL
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    # # For Testing Purpose Only
+    # config.llm_config.num_hidden_layers = 2
+    # config.vision_config.num_hidden_layers = 2
+
     ## STEP 1 -- LOAD THE MODEL
 
     # The original Intern-VL model, despite being multimodal, is loaded using `AutoModelForCausalLM` in Huggingface.
     # To maintain compatibility, we load this model using `QEFFAutoModelForCausalLM`.
 
-    model = QEFFAutoModelForCausalLM.from_pretrained(model_name, kv_offload=kv_offload, trust_remote_code=True)
+    model = QEFFAutoModelForCausalLM.from_pretrained(model_name, kv_offload=kv_offload,config=config, trust_remote_code=True)
 
-    ## STEP 2 -- EXPORT & COMPILE THE MODEL
-
+    # ## STEP 2 -- EXPORT & COMPILE THE MODEL
+    # config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    # # For Testing Purpose Only
+    # config.llm_config.num_hidden_layers = 2
+    # config.vision_config.num_hidden_layers = 2
     model.compile(
         num_cores=num_cores,
         num_devices=num_devices,
@@ -58,6 +67,7 @@ def run_intern_on_aic(
     internProcessor = InternProcessor(model.model, tokenizer)
 
     ## STEP 4 -- PREPROCESS THE INPUTS
+    print("For image resize for 747 x 1000 ")
 
     pixel_values = []
     num_patches_list = []
@@ -68,6 +78,11 @@ def run_intern_on_aic(
 
         # Images are resized to (1000, 747) for inference
         image = image.resize((1000, 747))
+        # image = image.resize((536, 354))
+        # image = image.resize((320, 180))
+        # image = image.resize((360, 240))
+        # image = image.resize((360, 120))
+
 
         # preprocess the resized image
         pixel_value = internProcessor.load_image(image, max_num=12)
@@ -91,12 +106,13 @@ def run_intern_on_aic(
 
     ## STEP 5 -- RUN INFERENCE VIA GENERATE FUNCTION
     streamer = TextStreamer(tokenizer)
+    print(f'Inputs shapes: \n inputs[input_ids].shape : {inputs["input_ids"].shape} \n inputs[attention_mask].shape : {inputs["attention_mask"].shape}, \n  inputs[pixel_values].shape : {inputs["pixel_values"].shape}')
     output = model.generate(inputs=inputs, streamer=streamer, generation_len=128)
     return output
 
 
 if __name__ == "__main__":
-    model_name = "OpenGVLab/InternVL2_5-1B"
+    model_name = "OpenGVLab/InternVL3_5-38B" #"OpenGVLab/InternVL2_5-1B"
 
     # Chat Template information for prompt preprocessing
     messages: List[List[str]] = []
@@ -105,9 +121,13 @@ if __name__ == "__main__":
     # Inputs for the model
 
     # Add additional prompts and image urls to the respective lists for multi batch compilation and inference
-    prompts = ["Please describe the image in detail."]
+    # prompts = ["Please describe the image in detail."]
+    # image_urls = [
+    #     "https://image.slidesharecdn.com/azureintroduction-191206101932/75/Introduction-to-Microsoft-Azure-Cloud-1-2048.jpg"
+    # ]
+    prompts = ["Describe this image."]
     image_urls = [
-        "https://image.slidesharecdn.com/azureintroduction-191206101932/75/Introduction-to-Microsoft-Azure-Cloud-1-2048.jpg"
+        "https://picsum.photos/id/237/536/354"
     ]
 
     ## Compilation parameters
@@ -142,6 +162,7 @@ if __name__ == "__main__":
         num_devices=num_devices,
         num_cores=num_cores,
     )
+    print(output)
 
 
 """
