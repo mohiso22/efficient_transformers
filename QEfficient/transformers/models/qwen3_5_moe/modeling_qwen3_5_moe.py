@@ -1702,11 +1702,29 @@ class QEffQwen3_5MoeVisionModel(Qwen3_5MoeVisionModel):
         )
         cu_seqlens = torch.cat([torch.tensor([0], dtype=cu_seqlens.dtype), cu_seqlens])
 
+        if bs == 1:
+            attention_mask = torch.zeros((), device=hidden_states.device, dtype=hidden_states.dtype)
+        else:
+            seq_len = hidden_states.shape[0]
+            rows = torch.arange(seq_len, device=hidden_states.device).view(1, -1)
+            cols = torch.arange(seq_len, device=hidden_states.device).view(-1, 1)
+            start = cu_seqlens[:-1].view(-1, 1, 1)
+            end = cu_seqlens[1:].view(-1, 1, 1)
+            row_mask = (rows >= start) & (rows < end)
+            col_mask = (cols >= start) & (cols < end)
+            attention_mask = ~(row_mask & col_mask).any(dim=0).unsqueeze(0)
+            attention_mask = torch.where(
+                attention_mask,
+                torch.tensor(MIN_MASKED_ATTENTION_VALUE, device=hidden_states.device, dtype=hidden_states.dtype),
+                torch.zeros((), device=hidden_states.device, dtype=hidden_states.dtype),
+            )
+
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
             )
         hidden_states = self.merger(hidden_states)
         return hidden_states
@@ -1726,6 +1744,7 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
@@ -1743,23 +1762,20 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
-        attention_mask = torch.full(
-            [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
-        )
-        seq_len = attention_mask.shape[-1]
-        rows = torch.arange(seq_len).view(1, -1)
-        cols = torch.arange(seq_len).view(-1, 1)
-
-        start = cu_seqlens[:-1].view(-1, 1, 1)
-        end = cu_seqlens[1:].view(-1, 1, 1)
-        row_mask = (rows >= start) & (rows < end)
-        col_mask = (cols >= start) & (cols < end)
-        block_mask = row_mask & col_mask
-
-        final_mask = torch.ones((seq_len, seq_len), dtype=torch.float32)
-        final_mask[block_mask.any(dim=0)] = 0
-        final_mask = torch.where(final_mask == 1.0, torch.finfo(q.dtype).min, final_mask)
-        attention_mask[0] = final_mask
+        if attention_mask is None:
+            seq_len = q.shape[0]
+            rows = torch.arange(seq_len, device=q.device).view(1, -1)
+            cols = torch.arange(seq_len, device=q.device).view(-1, 1)
+            start = cu_seqlens[:-1].view(-1, 1, 1)
+            end = cu_seqlens[1:].view(-1, 1, 1)
+            row_mask = (rows >= start) & (rows < end)
+            col_mask = (cols >= start) & (cols < end)
+            attention_mask = ~(row_mask & col_mask).any(dim=0).unsqueeze(0)
+            attention_mask = torch.where(
+                attention_mask,
+                torch.tensor(MIN_MASKED_ATTENTION_VALUE, device=q.device, dtype=q.dtype),
+                torch.zeros((), device=q.device, dtype=q.dtype),
+            )
 
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
